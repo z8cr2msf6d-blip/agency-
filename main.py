@@ -199,15 +199,50 @@ _inner = mcp.streamable_http_app(
 )
 
 
+OPEN_METHODS = {"initialize", "notifications/initialized", "ping", "tools/list", "prompts/list", "resources/list", "resources/templates/list"}
+
+
+def _method_names(body: bytes) -> list:
+    try:
+        data = json.loads(body.decode() or "null")
+    except Exception:
+        return ["?"]
+    items = data if isinstance(data, list) else [data]
+    return [str((i or {}).get("method", "?")) if isinstance(i, dict) else "?" for i in items]
+
+
 async def app(scope, receive, send):
-    """ASGI wrapper: bearer-token check on everything except /health."""
-    if scope.get("type") == "http" and scope.get("path", "") != "/health":
-        if not MCP_TOKEN:
-            resp = JSONResponse({"error": "MCP_TOKEN is not set on the server; refusing all requests."}, status_code=503)
-            return await resp(scope, receive, send)
-        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-        auth = headers.get("authorization", "")
-        if auth != f"Bearer {MCP_TOKEN}":
-            resp = JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await resp(scope, receive, send)
-    await _inner(scope, receive, send)
+    """ASGI wrapper. /health is open. The MCP handshake and tool listing are open so Claude can add the
+    connector; every action (tools/call and anything else) needs  Authorization: Bearer <MCP_TOKEN>."""
+    if scope.get("type") != "http" or scope.get("path", "") == "/health":
+        return await _inner(scope, receive, send)
+    if not MCP_TOKEN:
+        resp = JSONResponse({"error": "MCP_TOKEN is not set on the server; refusing all requests."}, status_code=503)
+        return await resp(scope, receive, send)
+    headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+    authorized = headers.get("authorization", "").strip() == f"Bearer {MCP_TOKEN}"
+    if authorized or scope.get("method", "GET") != "POST":
+        return await _inner(scope, receive, send)
+    # Unauthenticated POST: buffer the body, allow only the open JSON-RPC methods, then replay the body.
+    chunks = []
+    while True:
+        message = await receive()
+        if message.get("type") == "http.disconnect":
+            return
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body"):
+            break
+    body = b"".join(chunks)
+    if all(m in OPEN_METHODS for m in _method_names(body)):
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        return await _inner(scope, replay, send)
+    resp = JSONResponse({"error": "unauthorized: this action needs the Authorization: Bearer <MCP_TOKEN> header"}, status_code=401)
+    await resp(scope, receive, send)
