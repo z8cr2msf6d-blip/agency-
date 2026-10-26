@@ -1,0 +1,24 @@
+# Render Blueprint: New + → Blueprint → pick this repo → Apply.
+# Render builds the service from this file and asks you for the secret values below.
+services:
+  - type: web
+    name: agency-connect
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MCP_TOKEN
+        generateValue: true
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM
+        sync: false
+      - key: OWNER_PHONE
+        sync: false
+      - key: SMS_PER_HOUR
+        value: "40"
